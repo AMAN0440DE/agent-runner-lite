@@ -19,50 +19,54 @@ def evaluate_gate(
     writes_so_far: int,
     max_auto_writes: int = SETTINGS.max_auto_writes,
 ) -> GateDecision:
-    """TASK 1 — TODO(candidate): decide how one tool call is allowed to proceed.
+    """Decide how one tool call is allowed to proceed.
 
-    Start here. It's the smallest task, it needs nothing else to be finished first, and it's the
-    easiest thing in the project to test properly — which makes it the right place to practise
-    writing the tests first.
+    Pure: four plain values in, one decision out. No I/O, no state, no side effects — which is
+    what makes every branch testable in a few lines with no setup.
 
-    Notice what this function does NOT do: it doesn't call a tool, doesn't touch the workspace,
-    doesn't log. It takes four plain values and returns a decision. That's what "pure" means, and
-    it's why you can test every branch of it in a few lines with no setup. Keep it that way.
-
-    The policy — three governance stages, which in the real product a run graduates through as it
-    earns trust:
-
-      read tools
-          Always allowed, at every level. Looking something up can't break anything.
-
-      shadow — "show me what you would do"
-          Write tools are ALLOWED BUT SIMULATED (allow=True, simulate=True). The agent behaves
-          exactly as it would in production and we record what it tried to do, but nothing
-          actually changes. This is how a new agent gets evaluated against real tasks with zero
-          risk: run it in shadow, then check the effects it *would* have produced.
-
-      supervised — "ask me first"
-          Every write stops and waits for a human (allow=False, requires_approval=True).
-
-      autonomous — "go ahead, within limits"
-          Writes are auto-approved while `writes_so_far < max_auto_writes`. Once the budget is
-          used up, further writes need approval (allow=False, requires_approval=True). The budget
-          is the safety rail: an autonomous agent stuck in a loop can send two messages, not two
-          thousand.
-
-    Fill in `reason` with a short human-readable string. It ends up in the run's audit trail, and
-    "why was this allowed?" is the first question anyone asks about an agent that did something
-    surprising.
-
-    See GateDecision in app/models.py for the exact fields.
-
-    Suggested tests — this is a decision table, so a table-driven test with
-    `@pytest.mark.parametrize` covers it neatly:
-      - a read tool at each of the three levels → allowed, not simulated, no approval
-      - shadow + write → allow=True, simulate=True
-      - supervised + write → requires_approval=True, allow=False
-      - autonomous + write with writes_so_far=0 and max_auto_writes=2 → allowed
-      - autonomous + write with writes_so_far=2 and max_auto_writes=2 → requires approval
-        (the boundary — get this one exactly right; off-by-one here means the budget is 3, not 2)
+    Policy:
+      - Reads are allowed at every autonomy level. Looking something up cannot break anything.
+      - ``shadow``: writes are allowed but simulated. Nothing changes; we still record what the
+        agent would have done, which is what makes shadow a zero-risk correctness check.
+      - ``supervised``: every write stops and asks a reviewer.
+      - ``autonomous``: writes are auto-approved while ``writes_so_far < max_auto_writes``.
+        Once the budget is spent, further writes require approval. The boundary is a strict
+        ``<`` — with ``max_auto_writes=2``, writes 0 and 1 are auto, write 2 asks.
     """
-    raise NotImplementedError("evaluate_gate — see TASK 1")
+    if tool_kind == "read":
+        return GateDecision(
+            allow=True,
+            reason=f"read tool: always allowed (level={level})",
+        )
+
+    if level == "shadow":
+        return GateDecision(
+            allow=True,
+            simulate=True,
+            reason="shadow: write is simulated, nothing changes",
+        )
+
+    if level == "supervised":
+        return GateDecision(
+            allow=False,
+            requires_approval=True,
+            reason="supervised: every write requires approval",
+        )
+
+    # autonomous
+    if writes_so_far < max_auto_writes:
+        return GateDecision(
+            allow=True,
+            reason=(
+                f"autonomous: write {writes_so_far + 1} of {max_auto_writes} within budget"
+            ),
+        )
+
+    return GateDecision(
+        allow=False,
+        requires_approval=True,
+        reason=(
+            f"autonomous: budget exhausted ({writes_so_far}/{max_auto_writes}); "
+            "approval required"
+        ),
+    )
