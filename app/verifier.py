@@ -13,51 +13,67 @@ TASK 2: verify.
 
 from __future__ import annotations
 
-from app.models import Run, Task, Verdict
+from app.models import Effect, ExpectedEffect, Run, Task, Verdict
+
+
+def _matches(expected: ExpectedEffect, actual: Effect) -> bool:
+    """True if ``actual`` satisfies ``expected``.
+
+    Same tool name, and every key/value in ``expected.match`` appears in ``actual.args``.
+    Subset, not equality: the expectation says "a message to c_1" and doesn't care what the
+    body was, or that an idempotency key was attached.
+    """
+    if expected.tool != actual.tool:
+        return False
+    return all(actual.args.get(key) == value for key, value in expected.match.items())
 
 
 def verify(task: Task, run: Run) -> Verdict:
-    """TASK 2 — TODO(candidate): diff what was expected against what happened.
+    """Diff what was expected against what happened.
 
-    Another pure function — two objects in, a Verdict out, no I/O. Do this second.
-
-    You're comparing:
-      task.expected_effects : list[ExpectedEffect]  — each has `tool` and `match` (a dict)
-      run.effects           : list[Effect]          — each has `tool`, `args` (a dict), `simulated`
-
-    The rules:
-
-      1. An ExpectedEffect is MATCHED by an actual Effect when the `tool` names are equal AND
-         every key/value in the expected `match` appears in the actual `args`. It's a SUBSET
-         check, not an equality check — the expectation says "a message to c_1" and doesn't care
-         what the body was. So `{"contact_id": "c_1"} matches args {"contact_id": "c_1",
-         "body": "hi", "idempotency_key": "r_1:2"}`.
-
-      2. Each actual effect can only be used once. If the task expects two messages to c_1 and the
-         agent sent one, that's one matched and one missing — not two matched off the same send.
-         This is the rule people get wrong. If you loop over expectations and search the full list
-         of effects each time, a single effect will satisfy every expectation that looks like it.
-         Keep track of which effects you've already spent.
-
-      3. Any actual effect that no expectation claimed goes in `unexpected`. This half matters as
-         much as the other: an agent that did everything asked of it *and also* messaged three
-         other people has failed. Missing effects are a bug; extra effects are a liability.
-
-      4. passed = there is nothing in `missing` AND nothing in `unexpected`.
-
-      5. Set `mode` to the run's autonomy level, and `detail` to a short summary a human can read
-         at a glance — e.g. "2 matched, 0 missing, 1 unexpected".
-
-      6. Treat simulated effects exactly like real ones. Don't filter them out, don't special-case
-         shadow mode. That identical treatment IS the feature.
-
-    Suggested tests — one per outcome:
-      - everything expected happened, nothing else       → passed=True
-      - an expected effect never happened                → passed=False, it's in `missing`
-      - the agent did something nobody asked for         → passed=False, it's in `unexpected`
-      - a shadow run with simulated effects              → same verdict as the real run would give
-      - two identical expectations, only one real effect  → 1 matched, 1 missing (rule 2)
-
-    Write at least the first three before you write the function.
+    Rules:
+      1. An expectation is matched by an effect when the tool names are equal AND every
+         key/value in the expectation's ``match`` appears in the effect's ``args`` (subset, not
+         equality).
+      2. Each actual effect can be spent at most once. Two identical expectations cannot both be
+         satisfied by one send — that's the rule that catches the common bug of looping
+         expectations against the full effect list each time.
+      3. Effects no expectation claimed land in ``unexpected``. Extras are failures, not
+         curiosities: an agent that did its job *and also* messaged three other people has not
+         passed.
+      4. ``passed`` iff nothing is missing AND nothing is unexpected.
+      5. ``mode`` is the run's autonomy level; ``detail`` is a short human-readable summary.
+      6. Simulated effects are treated exactly like real ones. That identity is the feature —
+         it's what makes a shadow run a meaningful correctness proof.
     """
-    raise NotImplementedError("verify — see TASK 2")
+    spent: set[int] = set()
+    matched: list[ExpectedEffect] = []
+    missing: list[ExpectedEffect] = []
+
+    for expected in task.expected_effects:
+        for index, effect in enumerate(run.effects):
+            if index in spent:
+                continue
+            if _matches(expected, effect):
+                spent.add(index)
+                matched.append(expected)
+                break
+        else:
+            # No unspent effect satisfied this expectation.
+            missing.append(expected)
+
+    unexpected = [
+        effect for index, effect in enumerate(run.effects) if index not in spent
+    ]
+    passed = not missing and not unexpected
+
+    return Verdict(
+        passed=passed,
+        matched=matched,
+        missing=missing,
+        unexpected=unexpected,
+        mode=run.autonomy,
+        detail=(
+            f"{len(matched)} matched, {len(missing)} missing, {len(unexpected)} unexpected"
+        ),
+    )
