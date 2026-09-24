@@ -60,6 +60,124 @@ class AgentDeps:
 
 
 def run_agent(run: Run, deps: AgentDeps) -> Run:
+    task = deps.store.get_task(run.task_id)
+    if task is None:
+        run.error = f"task {run.task_id!r} not found"
+        _emit(run, "error", message=run.error)
+        run.status = "failed"
+        return run
+
+    messages = initial_messages(task.goal)
+    writes_done = 0
+    run.status = "running"
+
+    try:
+        for _ in range(deps.settings.max_steps):
+            # 1. DECIDE — ask the model what to do next.
+            intent = _decide(deps, messages)
+            if intent is None:
+                # The model never produced valid JSON, even after re-prompts.
+                run.error = "model never produced a valid decision"
+                _emit(run, "error", message=run.error)
+                run.status = "failed"
+                return run
+
+            # 2. FINISHED? — the model says the task is done.
+            if intent.intent == "final":
+                _emit(run, "final", message=intent.answer or "", result=intent.answer)
+                run.status = "completed"
+                break
+
+            # 3. FIND THE TOOL — a name the model invented is an observation, not a crash.
+            tool_name = intent.tool or ""
+            tool = deps.registry.get(tool_name)
+            if tool is None:
+                error = {"error": f"unknown tool: {tool_name!r}"}
+                _emit(
+                    run,
+                    "tool_result",
+                    tool=tool_name,
+                    ok=False,
+                    result=error,
+                    message=error["error"],
+                )
+                messages.append({"role": "user", "content": _observation(error)})
+                continue
+
+            # 4. GATE IT — record the decision so the transcript shows why it was allowed.
+            decision = evaluate_gate(
+                run.autonomy,
+                tool.kind,
+                writes_done,
+                deps.settings.max_auto_writes,
+            )
+            _emit(run, "gate", tool=tool.name, message=decision.reason)
+
+            if decision.requires_approval and not _ask_reviewer(task, run, deps):
+                # Reviewer declined. Also recoverable — the model gets to do something else.
+                error = {"error": "reviewer declined the write"}
+                _emit(
+                    run,
+                    "tool_result",
+                    tool=tool.name,
+                    ok=False,
+                    result=error,
+                    message=error["error"],
+                )
+                messages.append({"role": "user", "content": _observation(error)})
+                continue
+
+            # 5. RUN IT — for real, or simulated under shadow.
+            result, ok = _execute(tool, intent.args, run, decision.simulate)
+            _emit(
+                run,
+                "tool_call",
+                tool=tool.name,
+                args=dict(intent.args),
+                message=f"calling {tool.name}",
+            )
+            _emit(
+                run,
+                "tool_result",
+                tool=tool.name,
+                ok=ok,
+                result=result,
+                message=f"{tool.name} {'ok' if ok else 'failed'}",
+            )
+
+            # An effect that touched the world (or would have, in shadow): record it and
+            # count it against the write budget. A failed tool call records nothing.
+            if ok and tool.kind == "write":
+                run.effects.append(
+                    Effect(
+                        tool=tool.name,
+                        args=dict(intent.args),
+                        simulated=decision.simulate,
+                    )
+                )
+                writes_done += 1
+
+            # 6. TELL THE MODEL — the result of that call becomes the next observation.
+            messages.append({"role": "user", "content": _observation(result)})
+        else:
+            # The for-loop ran to its limit without the model saying "final".
+            run.error = (
+                f"max_steps ({deps.settings.max_steps}) reached without a final answer"
+            )
+            _emit(run, "error", message=run.error)
+            run.status = "failed"
+    except Exception as exc:
+        # A FatalError from the model, or any unexpected exception, must not escape to the
+        # caller. Record it on the run and mark it failed.
+        run.error = f"{type(exc).__name__}: {exc}"
+        _emit(run, "error", message=run.error)
+        run.status = "failed"
+        return run
+
+    # Only a completed run gets a verdict. A failed run has no meaningful diff to compute.
+    if run.status == "completed":
+        run.verdict = verify(task, run)
+    return run
     """TASK 3 — TODO(candidate): drive one run from start to finish. The main event.
 
     Do this AFTER tasks 1, 2 and 4 — this function calls all of them, and it's far easier to debug
