@@ -54,6 +54,29 @@ class StartRunBody(BaseModel):
 
 @router.post("/runs", response_model=Run, status_code=201)
 def start_run(body: StartRunBody) -> Run:
+    task = store.get_task(body.task_id)
+    if task is None:
+        raise HTTPException(404, "task not found")
+
+    run = Run(id=_new_id("r"), task_id=task.id, autonomy=task.autonomy)
+    store.add_run(run)
+
+    # Each run gets its own Workspace, so one run's messages and contact edits can't leak
+    # into another's. The registry is built from that same workspace — build_registry returns
+    # bound methods, so a registry made from a different Workspace would write to the wrong
+    # world.
+    ws = Workspace(CONTACTS)
+    deps = AgentDeps(
+        model=MockModelClient(script_for(task.scenario)),
+        workspace=ws,
+        registry=build_registry(ws),
+        store=store,
+        settings=SETTINGS,
+    )
+
+    # Synchronous: by the time this returns, the loop has finished, so the response contains
+    # the whole trace — every step, the effects, and the verdict.
+    return run_agent(run, deps)
     """TASK 5 — TODO(candidate): start a run and return the finished result.
 
     Small, but it's the piece that ties everything together — with this done you can drive your
