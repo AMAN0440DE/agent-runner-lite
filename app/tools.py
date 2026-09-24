@@ -68,40 +68,38 @@ class Workspace:
         return dict(contact)
 
     def send_message(
-        self, contact_id: str = "", body: str = "", idempotency_key: str = "", **_: Any
-    ) -> dict[str, Any]:
-        """TASK 4b — TODO(candidate): make sending a message safe to call twice.
+    self, contact_id: str = "", body: str = "", idempotency_key: str = "", **_: Any
+) -> dict[str, Any]:
+        """Make sending a message safe to call twice.
 
-        Here's the problem this solves. Sending a message is not like updating a field: if an
-        update runs twice you end up in the same place, but if a *send* runs twice the customer
-        gets two emails. And calls do get repeated — a retry after a timeout, a duplicated
-        request, a bug in a loop. So the tool itself has to refuse to do the work twice.
+        An idempotency key identifies one particular send. If we've already handled that key,
+        return the original result (with ``deduped: True``) and — crucially — do NOT append to
+        ``self.messages``. Otherwise append the message, remember the result under the key, and
+        return it with ``deduped: False``.
 
-        The standard fix is an idempotency key: the caller passes a string that identifies THIS
-        PARTICULAR send. The tool remembers which keys it has already handled. A repeat of a key
-        it has seen returns the original result instead of doing anything.
-
-        The agent already generates a stable key per (run, step) for you — see `_execute` in
-        app/agent.py. Your job is the remembering.
-
-        What to do:
-          - if `contact_id` or `idempotency_key` is missing, raise ToolError. A key is not
-            optional; without one the caller can't be protected.
-          - if the contact doesn't exist, raise ToolError (same as update_contact).
-          - if `idempotency_key` is already in `self._idem`: return the stored result, but with
-            "deduped": True, and do NOT append to self.messages.
-          - otherwise: append the message to `self.messages`, build the result, store it in
-            `self._idem` under the key, and return it with "deduped": False.
-          - the returned dict should include at least "message_id" and "contact_id".
-
-        A message id like f"m_{len(self.messages)}" is fine.
-
-        The test that matters: call it twice with the same key, then assert
-        `len(ws.messages) == 1`. Checking the return value alone isn't enough — the bug you're
-        guarding against is the second message existing, so assert on the world, not the
-        response. Write that test first.
+        The test that matters asserts on ``self.messages``, not on the return value: the bug
+        being guarded against is the second email existing.
         """
-        raise ToolError("send_message not implemented — see TASK 4b")
+        if not contact_id:
+            raise ToolError("send_message requires a contact_id")
+        if not idempotency_key:
+            raise ToolError("send_message requires an idempotency_key")
+        if contact_id not in self.contacts:
+            raise ToolError(f"contact {contact_id!r} not found")
+
+        # A key we've seen before: return the original result, don't send again.
+        if idempotency_key in self._idem:
+            return {**self._idem[idempotency_key], "deduped": True}
+
+        message_id = f"m_{len(self.messages)}"
+        self.messages.append(
+            {"message_id": message_id, "contact_id": contact_id, "body": body}
+        )
+        # Cache the *stored* result without the `deduped` flag, so a later dedup can report it
+        # honestly without overwriting the cached value with deduped=True.
+        stored = {"message_id": message_id, "contact_id": contact_id}
+        self._idem[idempotency_key] = stored
+        return {**stored, "deduped": False}
 
 
 @dataclass(frozen=True)
